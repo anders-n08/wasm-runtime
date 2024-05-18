@@ -1,0 +1,6 @@
+
+/.DS_Store
+/external
+/zig-cache
+/zig-out
+*.o
