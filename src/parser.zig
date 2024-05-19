@@ -11,6 +11,7 @@ const ParseError = error{
 const RuntimeError = error{
     FunctionNotFound,
     WrongTypeOnStack,
+    UnsupportedOpCode,
 };
 
 const StackEntryType = enum {
@@ -23,6 +24,7 @@ pub const StackEntry = union(StackEntryType) {
     set_frame: i32,
 };
 
+// fixme: Instance?
 pub const Machine = struct {
     allocator: std.mem.Allocator,
     stack: std.ArrayList(StackEntry),
@@ -38,6 +40,17 @@ pub const Machine = struct {
             .stack = std.ArrayList(StackEntry).init(allocator),
             .context = context,
         };
+    }
+
+    pub fn print(self: *Machine) void {
+        for (self.context.functions.items) |f| {
+            std.log.info("Fn name {s} type {d}", .{ f.name, f.type_id });
+
+            std.log.info("  expr", .{});
+            for (f.expr) |b| {
+                std.log.info("  {x}", .{b});
+            }
+        }
     }
 
     pub fn pushI32(self: *Machine, v: i32) !void {
@@ -87,6 +100,36 @@ pub const Machine = struct {
         }
     }
 
+    pub fn readULEB128(self: *Machine, comptime T: type) !T {
+        const U = if (@typeInfo(T).Int.bits < 8) u8 else T;
+        const ShiftT = std.math.Log2Int(U);
+
+        const max_group = (@typeInfo(U).Int.bits + 6) / 7;
+
+        var value: U = 0;
+        var group: ShiftT = 0;
+
+        while (group < max_group) : (group += 1) {
+            const byte = self.function.?.expr[self.pc];
+            self.pc += 1;
+
+            const ov = @shlWithOverflow(@as(U, byte & 0x7f), group * 7);
+            if (ov[1] != 0) return error.Overflow;
+
+            value |= ov[0];
+            if (byte & 0x80 == 0) break;
+        } else {
+            return error.Overflow;
+        }
+
+        // only applies in the case that we extended to u8
+        if (U != T) {
+            if (value > std.math.maxInt(T)) return error.Overflow;
+        }
+
+        return @as(T, @truncate(value));
+    }
+
     pub fn getI32FromStack(self: *Machine, idx: usize) !i32 {
         const set = self.stack.items[idx];
         switch (set) {
@@ -99,35 +142,57 @@ pub const Machine = struct {
         }
     }
 
+    fn opcodeSupported(self: *Machine, oc: u8) bool {
+        _ = self; // autofix
+        inline for (@typeInfo(opcode.Opcode).Enum.fields) |v| {
+            if (v.value == oc) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     pub fn runFunction(self: *Machine, function: *Function) !void {
         self.function = function;
         self.pc = 0;
 
-        self.param_stack_idx = self.stack.items.len - function.param_type.len;
+        const ty = self.context.types.items[self.function.?.type_id];
+
+        self.param_stack_idx = self.stack.items.len - ty.param_type.len;
 
         while (true) {
-            std.log.info("--> pc {d} param idx {d}", .{ self.pc, self.param_stack_idx });
             self.printStack();
             if (self.pc >= self.function.?.expr.len) {
                 std.log.info("--> ran out of expressions", .{});
                 break;
             }
             const op_b = self.function.?.expr[self.pc];
-            std.log.info("--> {x}", .{op_b});
+
+            if (!self.opcodeSupported(op_b)) {
+                return RuntimeError.UnsupportedOpCode;
+            }
+
             const op = @as(Opcode, @enumFromInt(op_b));
             self.pc += 1;
             switch (op) {
                 .end => {
                     break;
                 },
+                .call => {
+                    const v = try self.readULEB128(u32);
+                    _ = v; // autofix
+                    // fixme: call
+                },
                 .local_get => {
                     // fixme: index != 0?
+                    std.log.info("local.get {d} of {d}", .{ self.param_stack_idx, self.stack.items.len });
                     const v = try self.getI32FromStack(self.param_stack_idx);
-                    std.log.info("local.get v {d}\n", .{v});
                     try self.pushI32(v);
                     self.pc += 1;
                 },
                 .i32_const => {
+                    // fixme: Är inte detta LEB128?
                     const v = self.function.?.expr[self.pc];
                     try self.pushI32(v);
                     self.pc += 1;
@@ -143,23 +208,19 @@ pub const Machine = struct {
     }
 };
 
-// fixme: Is this an Instance?
+// fixme: Is this an Instance? Or a Mocdule
 pub const Context = struct {
     allocator: std.mem.Allocator,
+    types: std.ArrayList(Type),
     functions: std.ArrayList(Function),
+    local_function_index: u32 = 0,
 
     pub fn init(allocator: std.mem.Allocator) Context {
         return .{
             .allocator = allocator,
+            .types = std.ArrayList(Type).init(allocator),
             .functions = std.ArrayList(Function).init(allocator),
         };
-    }
-
-    pub fn print(self: Context) void {
-        std.log.info("--- context ---", .{});
-        for (self.functions.items) |*f| {
-            f.print();
-        }
     }
 };
 
@@ -167,21 +228,18 @@ const Frame = struct {
     return_arity: u32 = 0,
 };
 
-const Function = struct {
+const Type = struct {
     allocator: std.mem.Allocator,
     id: u32,
     param_type: []u8,
     result_type: []u8,
-
-    name: []u8 = undefined,
-    expr: []u8 = undefined,
 
     pub fn init(
         allocator: std.mem.Allocator,
         id: u32,
         param_type: []u8,
         result_type: []u8,
-    ) Function {
+    ) Type {
         return .{
             .allocator = allocator,
             .id = id,
@@ -189,41 +247,47 @@ const Function = struct {
             .result_type = result_type,
         };
     }
+};
 
-    pub fn setLocal(self: *Function, comptime T: type, index: usize, value: T) !void {
-        _ = self; // autofix
-        _ = index; // autofix
-        _ = value; // autofix
-        switch (T) {
-            i32 => {},
-            i64 => {},
-            f32 => {},
-            f64 => {},
-            else => {},
-        }
+const Function = struct {
+    allocator: std.mem.Allocator,
+    id: u32,
+    type_id: u32,
 
-        // _ = value; // autofix
-        // if (self.locals.len > index) {}
+    name: []u8 = undefined,
+    expr: []u8 = undefined,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        id: u32,
+        type_id: u32,
+    ) Function {
+        return .{
+            .allocator = allocator,
+            .id = id,
+            .type_id = type_id,
+        };
     }
 
     pub fn print(self: *Function) void {
         std.log.info("Function", .{});
         std.log.info("  Name {s}", .{self.name});
+        std.log.info("  Type {d}", .{self.type_id});
 
-        for (self.param_type) |v| {
-            const vt = @as(ValueType, @enumFromInt(v));
-            std.log.info("  Parameter {x} {s}", .{ v, @tagName(vt) });
-        }
-
-        for (self.result_type) |v| {
-            const vt = @as(ValueType, @enumFromInt(v));
-            std.log.info("  Result {x} {s}", .{ v, @tagName(vt) });
-        }
-        std.log.info("  Expressions nr {d}", .{self.expr.len});
-        for (self.expr) |e| {
-            std.log.info("    : {x}", .{e});
-        }
-        std.log.info("--- end of function", .{});
+        // for (self.param_type) |v| {
+        //     const vt = @as(ValueType, @enumFromInt(v));
+        //     std.log.info("  Parameter {x} {s}", .{ v, @tagName(vt) });
+        // }
+        //
+        // for (self.result_type) |v| {
+        //     const vt = @as(ValueType, @enumFromInt(v));
+        //     std.log.info("  Result {x} {s}", .{ v, @tagName(vt) });
+        // }
+        // std.log.info("  Expressions nr {d}", .{self.expr.len});
+        // for (self.expr) |e| {
+        //     std.log.info("    : {x}", .{e});
+        // }
+        // std.log.info("--- end of function", .{});
     }
 };
 
@@ -281,7 +345,6 @@ const ExportDesc = enum(u8) {
 pub fn skipSection(reader: anytype) !void {
     // std.log.info("{s}", .{@typeName(@TypeOf(reader))});
     const section_len = try std.leb.readULEB128(u32, reader);
-    std.log.info("Section len {d}", .{section_len});
     try reader.skipBytes(section_len, .{});
 }
 
@@ -306,37 +369,79 @@ pub fn readTypeSection(allocator: std.mem.Allocator, reader: anytype, context: *
         const vec_result_type_pos = reader.context.pos;
         try reader.skipBytes(vec_result_type_count, .{});
 
-        std.log.info("!!!!!!! Init function {d}\n", .{i});
-        const function = Function.init(
+        const ty = Type.init(
             allocator,
             i,
             reader.context.buffer[vec_param_type_pos .. vec_param_type_pos + vec_param_type_count],
             reader.context.buffer[vec_result_type_pos .. vec_result_type_pos + vec_result_type_count],
         );
+        try context.types.append(ty);
+    }
+}
+
+pub fn readImportSection(allocator: std.mem.Allocator, reader: anytype, context: *Context) !void {
+    const section_len = try std.leb.readULEB128(u32, reader);
+    _ = section_len;
+
+    const vec_import_count = try std.leb.readULEB128(u32, reader);
+    var i: u32 = 0;
+    while (i < vec_import_count) : (i += 1) {
+        const module_name_len = try std.leb.readULEB128(u32, reader);
+        try reader.skipBytes(module_name_len, .{});
+        const import_name_len = try std.leb.readULEB128(u32, reader);
+        const import_name_start = @as(u32, @intCast(reader.context.pos));
+        try reader.skipBytes(import_name_len, .{});
+        const import_desc = try reader.readByte();
+
+        // 0x00 typeidx
+        // 0x01 tabletype
+        // 0x02 memtype
+        // 0x03 globaltype
+
+        if (import_desc == 0x00) {
+            const ty = try reader.readByte();
+            var function = Function.init(allocator, i, ty);
+            function.name = reader.context.buffer[import_name_start .. import_name_start + import_name_len];
+            function.expr = &.{};
+            try context.functions.append(function);
+        } else {
+            return ParseError.NotImplemented;
+        }
+    }
+}
+
+pub fn readFunctionSection(allocator: std.mem.Allocator, reader: anytype, context: *Context) !void {
+    const section_len = try std.leb.readULEB128(u32, reader);
+    _ = section_len;
+
+    context.local_function_index = @as(u32, @intCast(context.functions.items.len));
+
+    const id_base = @as(u32, @intCast(context.functions.items.len));
+
+    // fixme: Should this be i128?
+    const vec_type_count = try std.leb.readULEB128(u32, reader);
+    var i: u32 = 0;
+    while (i < vec_type_count) : (i += 1) {
+        const ty = try std.leb.readULEB128(u32, reader);
+        const function = Function.init(allocator, i + id_base, ty);
         try context.functions.append(function);
     }
 }
 
 pub fn readCodeSection(reader: anytype, context: *Context) !void {
-    std.log.info("reader pos 0 {x}", .{reader.context.pos});
     const section_len = try std.leb.readULEB128(u32, reader);
     _ = section_len;
 
-    std.log.info("reader pos 1 {x}", .{reader.context.pos});
     const vec_function_count = try std.leb.readULEB128(u32, reader);
-    std.log.info("reader pos 2 {x}", .{reader.context.pos});
     var i: u32 = 0;
     while (i < vec_function_count) : (i += 1) {
-        std.log.info("!!!!!!! Init code {d}\n", .{i});
-        std.log.info("reader pos {x}", .{reader.context.pos});
-
         const code_block_len = try std.leb.readULEB128(u32, reader);
         const code_block_pos = reader.context.pos;
+        _ = code_block_pos; // autofix
 
         // -- locals
 
         // fixme:
-        const p0 = reader.context.pos;
         const local_pos = reader.context.pos;
         const local_count = try std.leb.readULEB128(u32, reader);
         _ = local_count;
@@ -344,7 +449,6 @@ pub fn readCodeSection(reader: anytype, context: *Context) !void {
         // -- function body i.e. expression
 
         const expr_pos = reader.context.pos;
-        std.log.info("{d} cb len {d} local pos {d} cb pos {d}", .{ p0, code_block_len, local_pos, code_block_pos });
         const skip_len = code_block_len - (expr_pos - local_pos);
         reader.skipBytes(skip_len, .{}) catch |err| {
             // fixme: Make sure that we end the loop if we reach the end of the stream.
@@ -353,20 +457,15 @@ pub fn readCodeSection(reader: anytype, context: *Context) !void {
             }
         };
 
-        var function = &context.functions.items[i];
+        var function = &context.functions.items[context.local_function_index + i];
         // fixme: locals
         // function.locals = reader.context.buffer[local_pos..expr_pos];
-        std.log.info("expr pos {d} reader pos {d}", .{ expr_pos, reader.context.pos });
         function.expr = reader.context.buffer[expr_pos..reader.context.pos];
-
-        std.log.info("!!", .{});
-        for (function.expr) |x| {
-            std.log.info("!! {x}", .{x});
-        }
     }
 }
 
-pub fn readExportSection(reader: anytype, context: *Context) !void {
+pub fn readExportSection(allocator: std.mem.Allocator, reader: anytype, context: *Context) !void {
+    _ = allocator; // autofix
     const section_len = try std.leb.readULEB128(u32, reader);
     _ = section_len;
 
@@ -384,8 +483,6 @@ pub fn readExportSection(reader: anytype, context: *Context) !void {
         switch (export_desc) {
             .funcidx => {
                 if (export_index < context.functions.items.len) {
-                    // fixme: Is this ok? Function only holds slices to a static memory. Or should
-                    // I handle the allocations?
                     var function = &context.functions.items[export_index];
                     function.name = reader.context.buffer[export_pos .. export_pos + export_len];
                 }
@@ -415,7 +512,6 @@ pub fn parse(allocator: std.mem.Allocator, source: []u8, machine: *Machine) !voi
         const section_id_int = reader.readByte() catch break;
         // fixme: Can fail enum conversion.
         const section_id = @as(SectionId, @enumFromInt(section_id_int));
-        std.log.info("Section {s}", .{@tagName(section_id)});
         switch (section_id) {
             .id_custom => {
                 try skipSection(&reader);
@@ -424,10 +520,10 @@ pub fn parse(allocator: std.mem.Allocator, source: []u8, machine: *Machine) !voi
                 try readTypeSection(allocator, &reader, machine.context);
             },
             .id_import => {
-                try skipSection(&reader);
+                try readImportSection(allocator, &reader, machine.context);
             },
             .id_function => {
-                try skipSection(&reader);
+                try readFunctionSection(allocator, &reader, machine.context);
             },
             .id_table => {
                 try skipSection(&reader);
@@ -439,7 +535,7 @@ pub fn parse(allocator: std.mem.Allocator, source: []u8, machine: *Machine) !voi
                 try skipSection(&reader);
             },
             .id_export => {
-                try readExportSection(&reader, machine.context);
+                try readExportSection(allocator, &reader, machine.context);
             },
             .id_start => {
                 try skipSection(&reader);
@@ -458,6 +554,4 @@ pub fn parse(allocator: std.mem.Allocator, source: []u8, machine: *Machine) !voi
             },
         }
     }
-
-    machine.context.print();
 }

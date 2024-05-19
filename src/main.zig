@@ -48,16 +48,16 @@ pub fn main() !void {
 
     try parser.parse(allocator, source[0..], &machine);
 
+    machine.print();
+
     // fixme: wtf should the api look like?
 
     std.log.info("run function test1", .{});
 
-    var function = try machine.getFunction("test1");
-    function.print();
-
+    const function = try machine.getFunction("test1");
     try machine.runFunction(function);
 
-    var stack_entry = machine.pop();
+    const stack_entry = machine.pop();
     switch (stack_entry) {
         .set_i32 => |v| {
             std.log.info("Value was {?}", .{v});
@@ -65,18 +65,17 @@ pub fn main() !void {
         else => {},
     }
 
-    std.log.info("run function test2", .{});
-    function = try machine.getFunction("test2");
-    function.print();
-
-    try machine.pushI32(-20); // p0
-    try machine.runFunction(function);
-
-    stack_entry = machine.pop();
-    switch (stack_entry) {
-        .set_i32 => |v| {
-            std.log.info("Value was {?}", .{v});
-        },
-        else => {},
-    }
+    // std.log.info("run function test2", .{});
+    // function = try machine.getFunction("test2");
+    //
+    // try machine.pushI32(-20); // p0
+    // try machine.runFunction(function);
+    //
+    // stack_entry = machine.pop();
+    // switch (stack_entry) {
+    //     .set_i32 => |v| {
+    //         std.log.info("Value was {?}", .{v});
+    //     },
+    //     else => {},
+    // }
 }
