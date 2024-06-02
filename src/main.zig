@@ -42,11 +42,9 @@ pub fn main() !void {
         return stderr.writeAll("Unable to read meta file\n\n");
     };
 
-    // fixme: Move away from parser...
-    var context = parser.Context.init(allocator);
-    var machine = parser.Machine.init(allocator, &context);
-
-    try parser.parse(allocator, source[0..], &machine);
+    var module = parser.Module.init(allocator);
+    try module.parse(source[0..]);
+    var machine = parser.Machine.init(allocator, &module);
 
     machine.print();
 
@@ -54,10 +52,10 @@ pub fn main() !void {
 
     std.log.info("run function test1", .{});
 
-    const function = try machine.getFunction("test1");
+    var function = try machine.getFunction("test1");
     try machine.runFunction(function);
 
-    const stack_entry = machine.pop();
+    var stack_entry = machine.pop();
     switch (stack_entry) {
         .set_i32 => |v| {
             std.log.info("Value was {?}", .{v});
@@ -65,17 +63,31 @@ pub fn main() !void {
         else => {},
     }
 
-    // std.log.info("run function test2", .{});
-    // function = try machine.getFunction("test2");
-    //
-    // try machine.pushI32(-20); // p0
-    // try machine.runFunction(function);
-    //
-    // stack_entry = machine.pop();
-    // switch (stack_entry) {
-    //     .set_i32 => |v| {
-    //         std.log.info("Value was {?}", .{v});
-    //     },
-    //     else => {},
-    // }
+    std.log.info("run function test2", .{});
+    function = try machine.getFunction("test2");
+
+    try machine.pushI32(-20); // p0
+    try machine.runFunction(function);
+
+    stack_entry = machine.pop();
+    switch (stack_entry) {
+        .set_i32 => |v| {
+            std.log.info("Value was {?}", .{v});
+        },
+        else => {},
+    }
+
+    std.log.info("run function test3", .{});
+    function = try machine.getFunction("test3");
+
+    try machine.pushI32(24); // p0
+    try machine.runFunction(function);
+
+    stack_entry = machine.pop();
+    switch (stack_entry) {
+        .set_i32 => |v| {
+            std.log.info("Value was {?}", .{v});
+        },
+        else => {},
+    }
 }
