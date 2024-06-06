@@ -1,5 +1,6 @@
 const std = @import("std");
 const parser = @import("parser.zig");
+const runtime = @import("runtime.zig");
 
 const Value = parser.Value;
 
@@ -44,9 +45,7 @@ pub fn main() !void {
 
     var module = parser.Module.init(allocator);
     try module.parse(source[0..]);
-    var machine = parser.Machine.init(allocator, &module);
-
-    machine.print();
+    var machine = runtime.Machine.init(allocator, &module);
 
     // fixme: wtf should the api look like?
 

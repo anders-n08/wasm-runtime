@@ -1,238 +1,32 @@
 const std = @import("std");
-const opcode = @import("opcode.zig");
+const types = @import("types.zig");
+const util = @import("util.zig");
 
-const Opcode = opcode.Opcode;
+const Opcode = types.Opcode;
+const Data = types.Data;
+const ValueType = types.ValueType;
+const Mut = types.Mut;
+const ExportDesc = types.ExportDesc;
 
 const ParseError = error{
     Invalid,
     NotImplemented,
 };
 
-const RuntimeError = error{
-    FunctionNotFound,
-    WrongTypeOnStack,
-    UnsupportedOpCode,
-    NotImplemented,
-};
-
-const StackEntryType = enum {
-    set_i32,
-    set_frame,
-};
-
-pub const StackEntry = union(StackEntryType) {
-    set_i32: i32,
-    set_frame: i32,
-};
-
-// fixme: Instance?
-pub const Machine = struct {
-    allocator: std.mem.Allocator,
-    stack: std.ArrayList(StackEntry),
-    module: *Module,
-
-    pc: usize = 0,
-    function: ?*Function = null,
-    param_stack_idx: usize = 0,
-
-    pub fn init(allocator: std.mem.Allocator, module: *Module) Machine {
-        return .{
-            .allocator = allocator,
-            .stack = std.ArrayList(StackEntry).init(allocator),
-            .module = module,
-        };
-    }
-
-    pub fn print(self: *Machine) void {
-        for (self.module.functions.items) |f| {
-            std.log.info("Fn name {s} type {d}", .{ f.name, f.type_id });
-
-            std.log.info("  expr", .{});
-            for (f.expr) |b| {
-                std.log.info("  {x}", .{b});
-            }
-        }
-    }
-
-    pub fn pushI32(self: *Machine, v: i32) !void {
-        try self.stack.append(.{
-            .set_i32 = v,
-        });
-    }
-
-    pub fn pop(self: *Machine) StackEntry {
-        const v = self.stack.pop();
-        return v;
-    }
-
-    pub fn popInteger(self: *Machine) !i32 {
-        const set = self.stack.pop();
-        switch (set) {
-            .set_i32 => |v| {
-                return v;
-            },
-            .set_frame => {
-                return RuntimeError.WrongTypeOnStack;
-            },
-        }
-    }
-
-    pub fn getFunction(self: *Machine, function_name: []const u8) !*Function {
-        for (self.module.functions.items) |*f| {
-            if (std.mem.eql(u8, function_name, f.name)) {
-                return f;
-            }
-        }
-
-        return RuntimeError.FunctionNotFound;
-    }
-
-    pub fn printStack(self: *Machine) void {
-        std.log.info("Stack", .{});
-        for (self.stack.items, 0..) |set, idx| {
-            switch (set) {
-                .set_i32 => |v| {
-                    std.log.info("  {d} i32 {d} 0x{X}", .{ idx, v, v });
-                },
-                .set_frame => |v| {
-                    std.log.info("  {d} frame {d} 0x{X}", .{ idx, v, v });
-                },
-            }
-        }
-    }
-
-    pub fn readULEB128(self: *Machine, comptime T: type) !T {
-        const U = if (@typeInfo(T).Int.bits < 8) u8 else T;
-        const ShiftT = std.math.Log2Int(U);
-
-        const max_group = (@typeInfo(U).Int.bits + 6) / 7;
-
-        var value: U = 0;
-        var group: ShiftT = 0;
-
-        while (group < max_group) : (group += 1) {
-            const byte = self.function.?.expr[self.pc];
-            self.pc += 1;
-
-            const ov = @shlWithOverflow(@as(U, byte & 0x7f), group * 7);
-            if (ov[1] != 0) return error.Overflow;
-
-            value |= ov[0];
-            if (byte & 0x80 == 0) break;
-        } else {
-            return error.Overflow;
-        }
-
-        // only applies in the case that we extended to u8
-        if (U != T) {
-            if (value > std.math.maxInt(T)) return error.Overflow;
-        }
-
-        return @as(T, @truncate(value));
-    }
-
-    pub fn getI32FromStack(self: *Machine, idx: usize) !i32 {
-        const set = self.stack.items[idx];
-        switch (set) {
-            .set_i32 => |v| {
-                return v;
-            },
-            .set_frame => {
-                return RuntimeError.WrongTypeOnStack;
-            },
-        }
-    }
-
-    fn opcodeSupported(self: *Machine, oc: u8) bool {
-        _ = self; // autofix
-        inline for (@typeInfo(opcode.Opcode).Enum.fields) |v| {
-            if (v.value == oc) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    pub fn runFunction(self: *Machine, function: *Function) !void {
-        self.function = function;
-        self.pc = 0;
-
-        std.log.info("Function {s} at {d} len {d}", .{ function.name, function.expr_idx, function.expr.len });
-        for (function.expr[0..]) |b| {
-            std.debug.print("{x:0>2} ", .{b});
-        }
-        std.debug.print("\n", .{});
-
-        const ty = self.module.types.items[self.function.?.type_id];
-
-        self.param_stack_idx = self.stack.items.len - ty.param_type.len;
-
-        while (true) {
-            self.printStack();
-            if (self.pc >= self.function.?.expr.len) {
-                std.log.info("--> ran out of expressions", .{});
-                break;
-            }
-            const op_b = self.function.?.expr[self.pc];
-
-            if (!self.opcodeSupported(op_b)) {
-                std.log.err("{s} : Op 0x{x} at {d} not implemented", .{ @src().fn_name, op_b, self.pc });
-                return RuntimeError.UnsupportedOpCode;
-            }
-
-            const op = @as(Opcode, @enumFromInt(op_b));
-            std.log.info("--> {d:0>4} : {s}", .{ self.pc, @tagName(op) });
-
-            self.pc += 1;
-            switch (op) {
-                .end => {
-                    break;
-                },
-                .call => {
-                    const v = try self.readULEB128(u32);
-                    // fixme: call
-                    // local or imported...
-
-                    if (v < self.module.local_function_index) {
-                        // imported
-
-                        const call_fn = self.module.functions.items[v];
-                        std.log.info("ADD 1", .{});
-                        if (std.mem.eql(u8, call_fn.name, "add")) {
-                            std.log.info("ADD 2", .{});
-                            const v0 = try self.popInteger();
-                            const v1 = try self.popInteger();
-                            std.log.info("ADD {d} {d}", .{ v0, v1 });
-                            try self.pushI32(v0 + v1);
-                        }
-                    } else {
-                        // local
-                        std.log.err("{s} : Op 0x{x} not implemented", .{ @src().fn_name, @intFromEnum(op) });
-                        return RuntimeError.NotImplemented;
-                    }
-                },
-                .local_get => {
-                    // fixme: index != 0?
-                    std.log.info("local.get {d} of {d}", .{ self.param_stack_idx, self.stack.items.len });
-                    const v = try self.getI32FromStack(self.param_stack_idx);
-                    try self.pushI32(v);
-                    self.pc += 1;
-                },
-                .i32_const => {
-                    const v = try self.readULEB128(i32);
-                    try self.pushI32(v);
-                },
-                .i32_add => {
-                    const v0 = try self.popInteger();
-                    const v1 = try self.popInteger();
-
-                    try self.pushI32(v0 + v1);
-                },
-                else => return RuntimeError.NotImplemented,
-            }
-        }
-    }
+const SectionId = enum(u8) {
+    id_custom,
+    id_type,
+    id_import,
+    id_function,
+    id_table,
+    id_memory,
+    id_global,
+    id_export,
+    id_start,
+    id_element,
+    id_code,
+    id_data,
+    id_data_count,
 };
 
 pub const Module = struct {
@@ -270,7 +64,6 @@ pub const Module = struct {
 
     pub fn readType(T: type, reader: anytype) !T {
         const v = try Module.read(@typeInfo(T).Enum.tag_type, reader);
-        std.log.info("readType value {d}", .{v});
         return @as(T, @enumFromInt(v));
     }
 
@@ -284,9 +77,16 @@ pub const Module = struct {
         try reader.skipBytes(section_len, .{});
     }
 
+    pub fn printSection(section_name: []const u8, reader: anytype, section_len: u32) void {
+        // fixme: One space to little on pad line when last line has less than 8 bytes.
+        // fixme: One charactor too many when first line has less than 8 bytes.
+        std.debug.print("--- section {s} ---\n", .{section_name});
+        util.printSlice(reader.context.buffer[reader.context.pos .. reader.context.pos + section_len]);
+    }
+
     pub fn readTypeSection(self: *Module, reader: anytype) !void {
         const section_len = try std.leb.readULEB128(u32, reader);
-        _ = section_len;
+        Module.printSection("Type", reader, section_len);
 
         const vec_type_count = try std.leb.readULEB128(u32, reader);
         var i: u32 = 0;
@@ -347,7 +147,7 @@ pub const Module = struct {
 
     pub fn readFunctionSection(self: *Module, reader: anytype) !void {
         const section_len = try std.leb.readULEB128(u32, reader);
-        _ = section_len;
+        Module.printSection("Function", reader, section_len);
 
         self.local_function_index = @as(u32, @intCast(self.functions.items.len));
 
@@ -429,28 +229,13 @@ pub const Module = struct {
         }
     }
 
-    // Contents of section Global:
-    // 000003c: 067f 0141 80c0 000b 7f00 4194 c000 0b7f  ...A......A.....
-    // 000004c: 0041 80c0 000b 7f00 4194 e000 0b7f 0041  .A......A......A
-    // 000005c: 84c0 000b 7f00 4190 c000 0b              ......A....
-    //
-    //   (global (;0;) (mut i32) (i32.const 8192))
-    //   (global (;1;) i32 (i32.const 8212))
-    //   (global (;2;) i32 (i32.const 8192))
-    //   (global (;3;) i32 (i32.const 12308))
-    //   (global (;4;) i32 (i32.const 8196))
-    //   (global (;5;) i32 (i32.const 8208))
-    //   (export "memory" (memory 0))
-    //   (export "framebuffer" (global 1))
-    //   (export "my_global2" (global 2))
-    //   (export "framebuffer2" (global 3))
-    //   (export "my_array" (global 4))
-    //   (export "my_global" (global 5))
-
     pub fn readGlobalSection(self: *Module, reader: anytype) !void {
         _ = self; // autofix
         const section_len = try Module.readULEB128(u32, reader);
-        _ = section_len;
+        const section_pos = reader.context.pos;
+        _ = section_pos; // autofix
+
+        Module.printSection("Global", reader, section_len);
 
         const p0 = Module.readerPos(reader);
         _ = p0; // autofix
@@ -464,12 +249,13 @@ pub const Module = struct {
                 .vt_f32 => return ParseError.Invalid,
             }
 
+            // std.log.err("{s} : Mut to read at 0x{x}", .{ @src().fn_name, reader.context.pos - section_pos });
             const mut = try Module.readType(Mut, reader);
             _ = mut; // autofix
 
             // fixme: should we execute the expression?
 
-            var op = try Module.readType(opcode.Opcode, reader);
+            var op = try Module.readType(Opcode, reader);
             while (op != .end) {
                 switch (op) {
                     .i32_const => {
@@ -482,7 +268,7 @@ pub const Module = struct {
                     },
                 }
 
-                op = try Module.readType(opcode.Opcode, reader);
+                op = try Module.readType(Opcode, reader);
             }
         }
     }
@@ -590,7 +376,7 @@ pub const Module = struct {
                     return ParseError.NotImplemented;
                 }
 
-                var op = try Module.readType(opcode.Opcode, reader);
+                var op = try Module.readType(Opcode, reader);
                 while (op != .end) {
                     switch (op) {
                         .i32_const => {
@@ -603,7 +389,7 @@ pub const Module = struct {
                         },
                     }
 
-                    op = try Module.readType(opcode.Opcode, reader);
+                    op = try Module.readType(Opcode, reader);
                 }
 
                 const vec_byte_count = try Module.readULEB128(u32, reader);
@@ -700,7 +486,7 @@ const Type = struct {
     }
 };
 
-const Function = struct {
+pub const Function = struct {
     allocator: std.mem.Allocator,
     id: u32,
     type_id: u32,
@@ -741,60 +527,4 @@ const Function = struct {
         // }
         // std.log.info("--- end of function", .{});
     }
-};
-
-const SectionId = enum(u8) {
-    id_custom,
-    id_type,
-    id_import,
-    id_function,
-    id_table,
-    id_memory,
-    id_global,
-    id_export,
-    id_start,
-    id_element,
-    id_code,
-    id_data,
-    id_data_count,
-};
-
-const ValueType = enum(u8) {
-    vt_i32 = 0x7f,
-    vt_f32 = 0x7d,
-
-    // vt_i64 = 0x7e,
-    // vt_f64 = 0x7c,
-    // fixme: vt_v128 = 0x7b,
-    // fixme: vt_funcref = 0x70,
-    // fixme: vt_externref = 0x6f,
-};
-
-const Mut = enum(u8) {
-    mut_const = 0,
-    mut_var = 1,
-};
-
-pub const Value = union(ValueType) {
-    vt_i32: i32,
-    vt_f32: f32,
-
-    // vt_i64: i64,
-    // vt_f64: f64,
-    // fixme: vt_v128:
-    // fixme: vt_funcref:
-    // fixme: vt_externref:
-};
-
-const ExportDesc = enum(u8) {
-    func = 0x00,
-    table = 0x01,
-    mem = 0x02,
-    global = 0x03,
-};
-
-const Data = enum(u8) {
-    active_mem_0 = 0x00,
-    passive = 0x01,
-    active_mem_x = 0x02,
 };
