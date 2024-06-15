@@ -57,6 +57,13 @@ pub const FuncInst = struct {
     expr: BufferReader,
 };
 
+// fixme: Necessary to import here?
+const Machine = @import("machine.zig").Machine;
+const Import = struct {
+    name: []const u8,
+    cb: ?*const fn (m: *Machine) anyerror!void = null,
+};
+
 const GlobalInst = struct {};
 
 pub const Store = struct {
@@ -64,6 +71,7 @@ pub const Store = struct {
     module: *Module,
     functions: std.ArrayList(FuncInst),
     globals: std.ArrayList(GlobalInst),
+    imports: std.ArrayList(Import),
 
     memory: std.ArrayList(u8),
 
@@ -77,11 +85,22 @@ pub const Store = struct {
             .functions = std.ArrayList(FuncInst).init(allocator),
             .globals = std.ArrayList(GlobalInst).init(allocator),
             .memory = std.ArrayList(u8).init(allocator),
+            .imports = std.ArrayList(Import).init(allocator),
         };
 
         const mem_size = try store.readMemoryLimitMin();
         try store.memory.ensureTotalCapacity(mem_size);
         std.debug.print("set memory size to 0x{x}\n", .{mem_size});
+
+        for (module.imports.items) |imp| {
+            try store.imports.append(.{
+                .name = imp.name,
+            });
+        }
+
+        // Functions are referenced through function indices, starting with the
+        // smallest index not referencing a function import.
+        const funcidx_base = module.imports.items.len;
 
         for (module.functions.items) |f| {
             var func_inst = FuncInst{
@@ -91,7 +110,7 @@ pub const Store = struct {
             };
 
             for (module.exports.items) |exp| {
-                if (exp.exportdesc_ty == .func and exp.exportdesc_idx == f.idx) {
+                if (exp.exportdesc_ty == .func and exp.exportdesc_idx == (f.idx + funcidx_base)) {
                     func_inst.name = exp.name;
                 }
             }
@@ -110,6 +129,7 @@ pub const Store = struct {
         self.functions.clearAndFree();
         self.globals.clearAndFree();
         self.memory.clearAndFree();
+        self.imports.clearAndFree();
     }
 
     pub fn readByte(self: *Store) anyerror!u8 {
@@ -147,6 +167,15 @@ pub const Store = struct {
         const mem_size = try memtype_reader.readInt(u32);
 
         return mem_size * 0x10000;
+    }
+
+    pub fn addCallback(self: *Store, name: []const u8, cb: *const fn (m: *Machine) anyerror!void) !void {
+        for (self.imports.items) |*imp| {
+            if (std.mem.eql(u8, name, imp.name)) {
+                imp.cb = cb;
+                break;
+            }
+        } else return StoreError.NotImplemented;
     }
 };
 

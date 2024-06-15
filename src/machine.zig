@@ -16,7 +16,7 @@ const Frame = struct {
     params_on_stack: u32 = 0,
 };
 
-const Machine = struct {
+pub const Machine = struct {
     allocator: std.mem.Allocator,
 
     store: *Store,
@@ -26,7 +26,10 @@ const Machine = struct {
 
     params_on_stack: u32 = 0,
 
-    pub fn init(allocator: std.mem.Allocator, store: *Store) Machine {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        store: *Store,
+    ) Machine {
         return .{
             .allocator = allocator,
             .store = store,
@@ -66,6 +69,13 @@ const Machine = struct {
         frame.params_on_stack += 1;
     }
 
+    pub fn callExternFunc(self: *Machine, idx: u32) !void {
+        const imp = self.store.imports.items[idx];
+        if (imp.cb) |cb| {
+            try cb(self);
+        }
+    }
+
     pub fn executeFunction(self: *Machine) !void {
         const frame = self.frame_stack.getLast();
         const function = frame.function;
@@ -78,6 +88,10 @@ const Machine = struct {
         var op = try expr.readEnum(Opcode);
         while (op != .end) {
             switch (op) {
+                .call => {
+                    const funcidx = try expr.readInt(u32);
+                    try self.callExternFunc(funcidx);
+                },
                 .local_get => {
                     const idx = try expr.readInt(u32);
                     const v = self.value_stack.items[frame.local_stack_idx + idx];
@@ -197,4 +211,34 @@ test "Test add_and_sub" {
     try machine.pushParam(i32, 20);
     try machine.executeFunction();
     try std.testing.expectEqual(22, machine.pop(i32));
+}
+
+fn add(machine: *Machine) anyerror!void {
+    const v0 = try machine.pop(i32);
+    const v1 = try machine.pop(i32);
+    try machine.push(i32, v0 + v1);
+}
+
+test "Test function_call" {
+    const allocator = std.testing.allocator;
+
+    const bin = @embedFile("test/function_call.wasm");
+    var m = Module.init(allocator);
+    defer m.deinit();
+    try m.load(bin);
+
+    var store = try Store.init(allocator, &m);
+    defer store.deinit();
+
+    try store.addCallback("add", &add);
+
+    var machine = Machine.init(allocator, &store);
+    defer machine.deinit();
+
+    try machine.prepareFunction("add_with_offset");
+    try machine.pushParam(i32, 10);
+    try machine.pushParam(i32, 20);
+    try machine.pushParam(i32, 30);
+    try machine.executeFunction();
+    try std.testing.expectEqual(60, machine.pop(i32));
 }
